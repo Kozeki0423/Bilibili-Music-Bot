@@ -1,0 +1,9 @@
+aiohttp
+pyncm
+qrcode
+pillow
+tk
+watchdog
+PyQt5
+psutil
+pywin32
