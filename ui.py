@@ -328,15 +328,6 @@ class SemiTransparentWidget(QWidget):
         video_label.setFont(font)
         layout.addRow(video_label, self.video_playback_checkbox)
         
-        # 视频超时容错时间
-        self.video_timeout_buffer_input = QLineEdit()
-        self.video_timeout_buffer_input.setFont(font)
-        self.video_timeout_buffer_input.setStyleSheet("padding: 8px; font-size: 14px;")
-        self.video_timeout_buffer_input.setText(str(self.config_manager.config.get("env_video_timeout_buffer", 3)))
-        timeout_label = QLabel("超时参数(s):")
-        timeout_label.setFont(font)
-        layout.addRow(timeout_label, self.video_timeout_buffer_input)
-        
         # 透明度
         self.alpha_slider = QSlider(Qt.Horizontal)
         self.alpha_slider.setMinimum(10)  # 0.1
@@ -400,6 +391,15 @@ class SemiTransparentWidget(QWidget):
         password_label = QLabel("管理员密码:")
         password_label.setFont(font)
         layout.addRow(password_label, self.admin_password_input)
+        
+        # 视频超时容错时间（移到高级设置）
+        self.video_timeout_buffer_input = QLineEdit()
+        self.video_timeout_buffer_input.setFont(font)
+        self.video_timeout_buffer_input.setStyleSheet("padding: 8px; font-size: 14px;")
+        self.video_timeout_buffer_input.setText(str(self.config_manager.config.get("env_video_timeout_buffer", 3)))
+        timeout_label = QLabel("视频超时参数(s):")
+        timeout_label.setFont(font)
+        layout.addRow(timeout_label, self.video_timeout_buffer_input)
     
     def create_whitelist_settings(self):
         layout = QVBoxLayout(self.whitelist_tab)
@@ -655,8 +655,6 @@ class SemiTransparentWidget(QWidget):
         self.queue_maxsize_input.setText(str(self.config_manager.config.get("env_queue_maxsize", "")))
         # 刷新视频播放功能开关
         self.video_playback_checkbox.setChecked(self.config_manager.config.get("enable_video_playback", True))
-        # 刷新视频超时容错时间
-        self.video_timeout_buffer_input.setText(str(self.config_manager.config.get("env_video_timeout_buffer", 3)))
         # 刷新alpha值
         alpha_value = self.config_manager.config.get("env_alpha", 1.0)
         self.alpha_slider.setValue(int(alpha_value * 100))
@@ -666,6 +664,8 @@ class SemiTransparentWidget(QWidget):
         self.session_file_input.setText(self.config_manager.config.get("env_session_file", "data/session.ncm"))
         self.whitelist_file_input.setText(self.config_manager.config.get("env_whitelist_file", "config/whitelist.json"))
         self.admin_password_input.setText(self.config_manager.config.get("env_admin_password", ""))
+        # 刷新视频超时容错时间
+        self.video_timeout_buffer_input.setText(str(self.config_manager.config.get("env_video_timeout_buffer", 3)))
         
         # 刷新白名单
         self.refresh_whitelist()
