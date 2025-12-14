@@ -22,7 +22,8 @@ def check_and_install_requirements():
         'pyncm': 'pyncm==2.2.1',
         'qrcode': 'qrcode==7.4.2',
         'PIL': 'pillow==9.5.0',
-        'watchdog': 'watchdog==3.0.0'  # 新增热重载依赖
+        'watchdog': 'watchdog==3.0.0',  # 新增热重载依赖
+        # 'yt-dlp': 'yt-dlp'  # 新增用于获取视频信息
     }
     
     # 为 Windows 平台添加 pywin32
@@ -89,6 +90,7 @@ import tkinter as tk
 from tkinter import scrolledtext
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+import yt_dlp
 
 def load_config():
     config_path = "config/config.json"
@@ -100,11 +102,14 @@ def load_config():
         "env_session_file": "data/session.ncm",
         "env_whitelist_file": "config/whitelist.json",
         "env_default_allowed_users": ["琴吹炒面"],
-        "env_default_admins": ["琴吹炒面"],
+        "env_default_admins": ["磕磕绊绊学语文", "琴吹炒面"],
         "env_queue_maxsize": 5,
         "env_log_file": "data/requests.log",
         "env_admin_password": "mysecret",
-        "env_alpha": 1.0  # 新增透明度配置
+        "env_alpha": 1.0,  
+        "enable_video_playback": True,  
+        "env_video_timeout_buffer": 3,  
+        "enable_fallback_playlist": True  
     }
     if not os.path.exists(config_path):
         # 创建config目录
@@ -115,7 +120,7 @@ def load_config():
         print("请修改配置文件后重新启动程序")
         sys.exit(1)
     with open(config_path, 'r', encoding='utf-8') as f:
-        print(f"{config_path} 已加载")
+        print(f"[SYS] {config_path} 已加载")
         return json.load(f)
         
 config = load_config()
@@ -129,9 +134,12 @@ WHITELIST_FILE = config.get("env_whitelist_file", "config/whitelist.json") # 白
 QUEUE_MAXSIZE = config.get("env_queue_maxsize", 5)
 LOG_FILE = config.get("env_log_file", "data/requests.log") 
 ADMIN_PASSWORD = config.get("env_admin_password", "Kozeki_Ui")
+ENABLE_VIDEO_PLAYBACK = config.get("enable_video_playback", True)  # 新增：启用视频播放功能
+VIDEO_TIMEOUT_BUFFER = config.get("env_video_timeout_buffer", 3)  # 新增：视频播放超时容错时间
+ENABLE_FALLBACK_PLAYLIST = config.get("enable_fallback_playlist", True)  # 新增：是否启用无请求时随机播放歌单的功能
 
 # root
-ADMINS = set(config.get("env_default_admins", ["琴吹炒面"]))
+ADMINS = set(config.get("env_default_admins", ["磕磕绊绊学语文", "琴吹炒面"]))
 
 # 初始用户白名单
 DEFAULT_ALLOWED_USERS = set(config.get("env_default_allowed_users", ["琴吹炒面"]))
@@ -157,11 +165,23 @@ global_temp_grant_per_user = 0  # 每人可领取的次数（由 !grant -c N 设
 user_already_granted = set()    # 记录已领取过配额的用户名
 temp_grant_counts = {}          # 当前每个用户的剩余次数
 
+# 当前播放的计时器任务
+current_timer_task = None
+
 # 日志
 def log_successful_request(username, song_name, artist):
     """记录成功的点歌请求到日志文件"""
     timestamp = datetime.now().strftime('%Y:%m:%d][%H:%M:%S')
     log_entry = f"[{timestamp}] [{username}]： {song_name} - {artist}\n"
+    # 确保data目录存在
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    with open(LOG_FILE, 'a', encoding='utf-8') as f:
+        f.write(log_entry)
+
+def log_video_request(username, video_id):
+    """记录成功的视频请求到日志文件"""
+    timestamp = datetime.now().strftime('%Y:%m:%d][%H:%M:%S')
+    log_entry = f"[{timestamp}] [{username}]： 视频 - {video_id}\n"
     # 确保data目录存在
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
     with open(LOG_FILE, 'a', encoding='utf-8') as f:
@@ -351,9 +371,104 @@ async def send_mpv_command(command):
         print(f"[{'SYS':>3}] 发送 MPV 命令出错: {e}")
         return False
 
+# 结束MPV进程的辅助函数
+def terminate_mpv_process(process):
+    """终止MPV进程及其子进程"""
+    if process is None or process.returncode is not None:
+        return
+        
+    try:
+        if platform.system() == "Windows":
+            # Windows: 使用taskkill终止进程树
+            subprocess.run(['taskkill', '/F', '/T', '/PID', str(process.pid)], 
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            # Unix-like: 使用psutil终止进程树
+            import psutil
+            try:
+                parent = psutil.Process(process.pid)
+                children = parent.children(recursive=True)
+                for child in children:
+                    try:
+                        child.terminate()
+                    except psutil.NoSuchProcess:
+                        pass
+                parent.terminate()
+                
+                # 等待进程结束，超时则强制杀死
+                gone, alive = psutil.wait_procs([parent] + children, timeout=3)
+                for p in alive:
+                    try:
+                        p.kill()
+                    except psutil.NoSuchProcess:
+                        pass
+            except psutil.NoSuchProcess:
+                pass
+    except ImportError:
+        # 如果没有psutil，使用标准方法
+        try:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        except ProcessLookupError:
+            pass  # 进程已经结束
+    except Exception as e:
+        print(f"[{'SYS':>3}] 终止MPV进程时出错: {e}")
+
+# 获取视频时长
+def get_video_duration(video_url):
+    """使用yt-dlp获取视频时长"""
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+            duration = info.get('duration', None)
+            if duration is not None:
+                return duration
+            else:
+                print(f"[{'SYS':>3}] 无法获取视频时长")
+                return 0
+    except Exception as e:
+        print(f"[{'SYS':>3}] 获取视频时长失败: {e}")
+        return 60
+
+# 视频播放计时器
+async def video_timer(duration, video_id):
+    """视频播放计时器，超时后自动终止MPV进程"""
+    global current_mpv_process
+    print(f"[{'SYS':>3}] 视频时长: {duration}s")
+    
+    # 等待指定时间，但检查是否播放已被跳过
+    start_time = time.time()
+    remaining = duration + VIDEO_TIMEOUT_BUFFER  # 增加配置的容错时间
+    
+    while remaining > 0:
+        await asyncio.sleep(0.5)
+        elapsed = time.time() - start_time
+        remaining = duration + VIDEO_TIMEOUT_BUFFER - elapsed
+        
+        # 检查MPV进程是否还存在
+        if current_mpv_process and current_mpv_process.returncode is not None:
+            print(f"[{'SYS':>3}] MPV进程已结束，计时器停止")
+            break
+    
+    # 如果进程仍在运行，强制终止
+    if current_mpv_process and current_mpv_process.returncode is None:
+        print(f"[{'SYS':>3}] exit(1)")
+        await send_mpv_command('quit')
+        await asyncio.sleep(0.5)
+        terminate_mpv_process(current_mpv_process)
+    else:
+        print(f"[{'SYS':>3}] exit(0)")
+
 # 播放器后台任务
 async def player_worker():
-    global current_mpv_process, mpv_ipc_path, current_volume, current_playing
+    global current_mpv_process, mpv_ipc_path, current_volume, current_playing, current_timer_task
     print(f"[{'SYS':>3}] 播放引擎就绪...")
     
     # 创建临时 IPC 路径
@@ -367,59 +482,140 @@ async def player_worker():
     while True:
         try:
             if song_queue.empty():
-                print(f"[{'SYS':>3}] 无请求，随机播放歌单...")
-                song_item = music_bot.get_random_fallback_song()
-                if not song_item or not song_item[0]:
-                    print(f"[{'SYS':>3}] 获取失败，10秒后重试...")
-                    await asyncio.sleep(10)
+                if ENABLE_FALLBACK_PLAYLIST:  # 检查是否启用随机播放歌单功能
+                    print(f"[{'SYS':>3}] 无请求，随机播放歌单...")
+                    song_item = music_bot.get_random_fallback_song()
+                    if not song_item or not song_item[0]:
+                        print(f"[{'SYS':>3}] 获取失败，10秒后重试...")
+                        await asyncio.sleep(10)
+                        continue
+                else:
+                    print(f"[{'SYS':>3}] 空队列...")
+                    await asyncio.sleep(5)
                     continue
             else:
                 print(f"[{'SYS':>3}] 准备播放点歌 (剩余: {song_queue.qsize()})...")
                 song_item = await song_queue.get()
 
-            sid, name, artist = song_item
-            current_playing = (sid, name, artist)  # 更新当前播放
-            print(f"[{'SYS':>3}] 正在解析: {name} - {artist}")
-            mp3_url = music_bot.get_song_url(sid)
-            if not mp3_url:
-                print(f"[{'SYS':>3}] 解析失败 跳过")
-                current_playing = None
-                continue
+            # 取消之前的计时器任务
+            if current_timer_task and not current_timer_task.done():
+                current_timer_task.cancel()
+                try:
+                    await current_timer_task
+                except asyncio.CancelledError:
+                    pass
 
-            print(f"[{'SYS':>3}] 启动 MPV: {name}")
+            # 检查是否是视频ID
+            if isinstance(song_item, tuple) and len(song_item) == 3:
+                sid, name, artist = song_item
+                current_playing = (sid, name, artist)  # 更新当前播放
+                print(f"[{'SYS':>3}] 正在解析: {name} - {artist}")
+                mp3_url = music_bot.get_song_url(sid)
+                if not mp3_url:
+                    print(f"[{'SYS':>3}] 解析失败 跳过")
+                    current_playing = None
+                    continue
 
-            # 构建 MPV 参数
-            mpv_args = [
-                MPV_PATH,
-                '--no-video',
-                '--idle=no',
-                f'--input-ipc-server={mpv_ipc_path}',
-                f'--volume={current_volume}',  # 设置当前音量
-                '--msg-level=all=no',  # 减少日志
-                mp3_url
-            ]
+                print(f"[{'SYS':>3}] 启动 MPV: {name}")
 
-            creationflags = 0
-            if sys.platform == 'win32':
-                creationflags = subprocess.CREATE_NO_WINDOW
+                # 构建 MPV 参数
+                mpv_args = [
+                    MPV_PATH,
+                    '--no-video',  # 仅播放音频
+                    '--idle=no',
+                    f'--input-ipc-server={mpv_ipc_path}',
+                    f'--volume={current_volume}',  # 设置当前音量
+                    '--msg-level=all=no',  # 减少日志
+                    mp3_url
+                ]
 
-            current_mpv_process = await asyncio.create_subprocess_exec(
-                *mpv_args,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=creationflags
-            )
+                creationflags = 0
+                if sys.platform == 'win32':
+                    creationflags = subprocess.CREATE_NO_WINDOW
 
-            await current_mpv_process.wait()
-            print(f"[{'SYS':>3}] 播放结束: {name}")
+                current_mpv_process = await asyncio.create_subprocess_exec(
+                    *mpv_args,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=creationflags
+                )
+            else:
+                # 处理视频ID
+                video_id = song_item
+                current_playing = (None, f"{video_id}", "")  # 更新当前播放
+                print(f"[{'SYS':>3}] 正在播放: {video_id}")
+
+                # 构建视频播放URL
+                video_url = f"https://www.bilibili.com/video/{video_id}"
+                
+                # 获取视频时长
+                # print(f"[{'SYS':>3}] 获取视频时长...")
+                duration = get_video_duration(video_url)
+                # print(f"[{'SYS':>3}] 视频时长: {duration}s")
+                
+                # 启动计时器任务
+                current_timer_task = asyncio.create_task(video_timer(duration, video_id))
+                
+                # 构建 MPV 参数 - 播放视频，但仅提取音频
+                mpv_args = [
+                    MPV_PATH,
+                    '--no-video',  # 仅播放音频，忽略画面
+                    '--idle=yes',  # 保持播放器空闲状态，直到播放完成
+                    f'--input-ipc-server={mpv_ipc_path}',
+                    f'--volume={current_volume}',  # 设置当前音量
+                    '--msg-level=all=no',  # 减少日志
+                    '--ytdl=yes',  # 启用youtube-dl支持，用于处理B站视频
+                    '--cache=yes',  # 启用缓存
+                    '--demuxer-max-bytes=50MiB',  # 增加缓冲区大小
+                    '--demuxer-max-back-bytes=25MiB',  # 增加回退缓冲区
+                    video_url
+                ]
+
+                creationflags = 0
+                if sys.platform == 'win32':
+                    creationflags = subprocess.CREATE_NO_WINDOW
+
+                current_mpv_process = await asyncio.create_subprocess_exec(
+                    *mpv_args,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=creationflags
+                )
+
+            # 等待播放完成
+            try:
+                await current_mpv_process.wait()
+            except Exception as e:
+                print(f"[{'SYS':>3}] 等待MPV进程结束时出错: {e}")
             
-            # 记录到历史
-            play_history.append((sid, name, artist, datetime.now().isoformat()))
-            if len(play_history) > MAX_HISTORY:
-                play_history.pop(0)  # FIFO
+            # 取消计时器任务（如果还在运行）
+            if current_timer_task and not current_timer_task.done():
+                current_timer_task.cancel()
+                try:
+                    await current_timer_task
+                except asyncio.CancelledError:
+                    pass
+                # print(f"[{'SYS':>3}] 计时器已取消")
+            
+            # 获取播放完成的标题
+            if isinstance(song_item, tuple) and len(song_item) == 3:
+                sid, name, artist = song_item
+                print(f"[{'SYS':>3}] 播放结束: {name}")
+                # 记录到历史
+                play_history.append((sid, name, artist, datetime.now().isoformat()))
+                if len(play_history) > MAX_HISTORY:
+                    play_history.pop(0)  # FIFO
+            else:
+                video_id = song_item
+                print(f"[{'SYS':>3}] 视频播放结束: {video_id}")
+
+            # 确保进程完全终止
+            if current_mpv_process:
+                terminate_mpv_process(current_mpv_process)
             
             current_mpv_process = None
             current_playing = None
+            current_timer_task = None
 
             await asyncio.sleep(1)
         except FileNotFoundError:
@@ -428,8 +624,19 @@ async def player_worker():
             await asyncio.sleep(10)
         except Exception as e:
             print(f"[{'SYS':>3}] 播放引擎错误: {e}")
+            # 取消计时器任务
+            if current_timer_task and not current_timer_task.done():
+                current_timer_task.cancel()
+                try:
+                    await current_timer_task
+                except asyncio.CancelledError:
+                    pass
+            # 确保进程完全终止
+            if current_mpv_process:
+                terminate_mpv_process(current_mpv_process)
             current_mpv_process = None
             current_playing = None
+            current_timer_task = None
             await asyncio.sleep(5)
 
 # B站 HTTP 轮询模块
@@ -612,6 +819,43 @@ def is_valid_admin_key(content):
     
     return False, "密钥不匹配"
 
+# 检查B站视频ID格式 (av号或BV号)
+def is_valid_bilibili_id(video_id):
+    # 检查av号格式 (如 av123456789)
+    if video_id.lower().startswith('av'):
+        av_num = video_id[2:]
+        return av_num.isdigit()
+    
+    # 检查BV号格式 (如 BV1xx411c7mu)
+    if video_id.startswith('BV'):
+        # BV号应为12位字符，包含字母和数字
+        return len(video_id) == 12 and re.match(r'^[a-zA-Z0-9]+$', video_id)
+    
+    return False
+
+# 解析B站视频ID，支持BV号_pN格式
+def parse_bilibili_id(video_id):
+    """
+    解析B站视频ID，支持BV号_pN格式
+    返回 (bv号, 分p数) 元组，如果不符合格式则返回 (原ID, None)
+    """
+    # 检查是否是BV号_pN格式
+    match = re.match(r'^(BV[A-Za-z0-9]{10})_p(\d+)$', video_id)
+    if match:
+        bv_id = match.group(1)
+        p_number = int(match.group(2))
+        return bv_id, p_number
+    
+    # 检查是否是BV号?p=N格式
+    match = re.match(r'^(BV[A-Za-z0-9]{10}).*?\?p=(\d+)$', video_id)
+    if match:
+        bv_id = match.group(1)
+        p_number = int(match.group(2))
+        return bv_id, p_number
+    
+    # 如果不是特殊格式，返回原ID
+    return video_id, None
+
 # 输出格式化函数
 def format_output(prefix, user_name, content):
     """格式化输出，使前缀对齐"""
@@ -656,7 +900,7 @@ class CommandHandler:
         # 解析命令
         parts = command_text.split()
         cmd = parts[0].lower()
-        global current_volume, grant_until_time, global_temp_grant_per_user, user_already_granted, temp_grant_counts  # 引用全局音量变量
+        global current_volume, grant_until_time, global_temp_grant_per_user, user_already_granted, temp_grant_counts, current_timer_task, VIDEO_TIMEOUT_BUFFER, ENABLE_VIDEO_PLAYBACK, ROOM_ID, POLL_INTERVAL, FALLBACK_PLAYLIST_ID, QUEUE_MAXSIZE, config, ENABLE_FALLBACK_PLAYLIST  # 引用全局音量变量
         try:
             if cmd == '!touch' and len(parts) >= 2:
                 username = parts[1]
@@ -747,9 +991,21 @@ class CommandHandler:
 │ !time -h       - 获取当前时间
 
 ┌──────────────────────
+│ [视频播放控制]
+├──────────────────────
+│ !clock               - 查询计时器超时参数
+│ !clock {num}         - 设置计时器超时参数
+│ !service video start - 启用视频播放功能
+│ !service video stop  - 禁用视频播放功能
+
+┌──────────────────────
 │ [其他]
 ├──────────────────────
-│ !help          - 显示本帮助
+│ !service           - 检查功能服务
+│ !env               - 查看所有环境变量
+│ !env {env}         - 查询环境变量值
+│ !env {env} {value} - 设置环境变量值
+│ !help              - 显示本帮助
 
  点歌：song name / id  - 点播歌曲
                 """
@@ -762,6 +1018,14 @@ class CommandHandler:
                 return "已恢复播放"
             elif cmd == '!skip':
                 if current_mpv_process and current_mpv_process.returncode is None:
+                    # 取消计时器任务
+                    if current_timer_task and not current_timer_task.done():
+                        current_timer_task.cancel()
+                        try:
+                            await current_timer_task
+                        except asyncio.CancelledError:
+                            pass
+                        # print(f"[{'SYS':>3}] 跳过歌曲，计时器已取消")
                     await send_mpv_command('quit')
                     return "已跳过当前歌曲"
                 else:
@@ -901,11 +1165,172 @@ class CommandHandler:
                         return f"{target} 没有点过歌"
                 except Exception as e:
                     return f"查询失败: {e}"
+            elif cmd == '!clock':
+                # !clock 命令实现
+                if len(parts) == 1:
+                    # 查看当前 VIDEO_TIMEOUT_BUFFER
+                    return f"VIDEO_TIMEOUT_BUFFER: {VIDEO_TIMEOUT_BUFFER}"
+                elif len(parts) == 2:
+                    # 设置（已有逻辑）
+                    try:
+                        num = int(parts[1])
+                        if num < 0:
+                            return "Undefined Behavior"
+                        if num > 300:  # 限制最大值为300秒（5分钟）
+                            return "Undefined Behavior"
+                        
+                        # 更新全局变量
+                        VIDEO_TIMEOUT_BUFFER = num
+                        # 更新配置文件
+                        config["env_video_timeout_buffer"] = VIDEO_TIMEOUT_BUFFER
+                        with open("config/config.json", "w", encoding="utf-8") as f:
+                            json.dump(config, f, indent=4, ensure_ascii=False)
+                        
+                        return f"超时参数: {num} s"
+                    except ValueError:
+                        return "Invalid Literal"
+            elif cmd == '!env':
+                # !env 命令实现
+                if len(parts) == 1:
+                    # 查看所有环境变量
+                    env_vars = {
+                        "ROOM_ID": ROOM_ID,
+                        "POLL_INTERVAL": POLL_INTERVAL,
+                        "FALLBACK_PLAYLIST_ID": FALLBACK_PLAYLIST_ID,
+                        "QUEUE_MAXSIZE": QUEUE_MAXSIZE,
+                        "ENABLE_VIDEO_PLAYBACK": ENABLE_VIDEO_PLAYBACK,
+                        "VIDEO_TIMEOUT_BUFFER": VIDEO_TIMEOUT_BUFFER,
+                        "ENABLE_FALLBACK_PLAYLIST": ENABLE_FALLBACK_PLAYLIST,
+                        "env_alpha": config.get("env_alpha", 1.0)
+                    }
+                    result = []
+                    for var_name, var_value in env_vars.items():
+                        result.append(f"{var_name}: {var_value}")
+                    return "\n"+"\n".join(result)
+                elif len(parts) == 2:
+                    # 查询单个环境变量
+                    var_name = parts[1].upper()
+                    if var_name == "ROOM_ID":
+                        return f"ROOM_ID: {ROOM_ID}"
+                    elif var_name == "POLL_INTERVAL":
+                        return f"POLL_INTERVAL: {POLL_INTERVAL}"
+                    elif var_name == "FALLBACK_PLAYLIST_ID":
+                        return f"FALLBACK_PLAYLIST_ID: {FALLBACK_PLAYLIST_ID}"
+                    elif var_name == "QUEUE_MAXSIZE":
+                        return f"QUEUE_MAXSIZE: {QUEUE_MAXSIZE}"
+                    elif var_name == "ENABLE_VIDEO_PLAYBACK":
+                        return f"ENABLE_VIDEO_PLAYBACK: {ENABLE_VIDEO_PLAYBACK}"
+                    elif var_name == "VIDEO_TIMEOUT_BUFFER":
+                        return f"VIDEO_TIMEOUT_BUFFER: {VIDEO_TIMEOUT_BUFFER}"
+                    elif var_name == "ENABLE_FALLBACK_PLAYLIST":
+                        return f"ENABLE_FALLBACK_PLAYLIST: {ENABLE_FALLBACK_PLAYLIST}"
+                    elif var_name == "ENV_ALPHA":
+                        return f"env_alpha: {config.get('env_alpha', 1.0)}"
+                    else:
+                        return f"未知环境变量: {var_name}"
+                elif len(parts) == 3:
+                    # 设置环境变量
+                    var_name = parts[1].upper()
+                    var_value = parts[2]
+                    try:
+                        if var_name == "ROOM_ID":
+                            new_value = int(var_value)
+                            config["env_roomid"] = new_value
+                            ROOM_ID = new_value
+                        elif var_name == "POLL_INTERVAL":
+                            new_value = int(var_value)
+                            config["env_poll_interval"] = new_value
+                            POLL_INTERVAL = new_value
+                        elif var_name == "FALLBACK_PLAYLIST_ID":
+                            new_value = int(var_value)
+                            config["env_playlist"] = new_value
+                            FALLBACK_PLAYLIST_ID = new_value
+                        elif var_name == "QUEUE_MAXSIZE":
+                            new_value = int(var_value)
+                            config["env_queue_maxsize"] = new_value
+                            QUEUE_MAXSIZE = new_value
+                        elif var_name == "ENABLE_VIDEO_PLAYBACK":
+                            new_value = var_value.lower() in ('true', '1', 'yes', 'on')
+                            config["enable_video_playback"] = new_value
+                            ENABLE_VIDEO_PLAYBACK = new_value
+                        elif var_name == "VIDEO_TIMEOUT_BUFFER":
+                            new_value = int(var_value)
+                            if new_value < 0 or new_value > 300:
+                                return "Undefined Behavior"
+                            config["env_video_timeout_buffer"] = new_value
+                            VIDEO_TIMEOUT_BUFFER = new_value
+                        elif var_name == "ENABLE_FALLBACK_PLAYLIST":
+                            new_value = var_value.lower() in ('true', '1', 'yes', 'on')
+                            config["enable_fallback_playlist"] = new_value
+                            ENABLE_FALLBACK_PLAYLIST = new_value
+                        elif var_name == "ENV_ALPHA":
+                            new_value = float(var_value)
+                            config["env_alpha"] = new_value
+                        else:
+                            return f"未知环境变量: {var_name}"
+                        
+                        # 保存配置到文件
+                        with open("config/config.json", "w", encoding="utf-8") as f:
+                            json.dump(config, f, indent=4, ensure_ascii=False)
+                        
+                        # 主动触发热重载，模拟文件修改事件
+                        # print(format_system_output("配置已更新，触发热重载..."))
+                        # 调用配置热重载处理器来更新全局变量
+                        config_handler = ConfigReloadHandler()
+                        config_handler.on_modified(type('obj', (object,), {'src_path': "config/config.json"})())
+                        
+                        return f"{var_name} 已设置为: {var_value}"
+                    except ValueError:
+                        return "无效的值类型"
+                else:
+                    return "无效的env命令参数，使用 !help 查看帮助"
+            elif cmd == '!service' and len(parts) >= 3:
+                # 处理 !service video start/stop 命令
+                if parts[1].lower() == 'video':
+                    if parts[2].lower() == 'start':
+                        # 传递当前的ENABLE_VIDEO_PLAYBACK值作为参数
+                        return CommandHandler._set_video_playback(True)
+                    elif parts[2].lower() == 'stop':
+                        # 传递当前的ENABLE_VIDEO_PLAYBACK值作为参数
+                        return CommandHandler._set_video_playback(False)
+                    else:
+                        return "无效的service命令参数，使用 !help 查看帮助"
+                else:
+                    return "无效的service命令参数，使用 !help 查看帮助"
+            elif cmd == '!service' and len(parts) == 1:
+                # 处理 !service 命令，检查当前启用的功能服务
+                # 传递全局变量ENABLE_VIDEO_PLAYBACK作为参数
+                return CommandHandler._get_service_status(ENABLE_VIDEO_PLAYBACK, ENABLE_FALLBACK_PLAYLIST)
             else:
                 return f"unknown command: {cmd}，使用 !help 查看帮助"
         except Exception as e:
             print(format_system_output(f"命令执行出错: {str(e)}"))
             return f"命令执行出错: {str(e)}"
+
+    @staticmethod
+    def _set_video_playback(enable):
+        """设置视频播放功能的启用状态"""
+        global ENABLE_VIDEO_PLAYBACK  # 只在这里声明全局变量
+        ENABLE_VIDEO_PLAYBACK = enable
+        # 更新配置文件
+        config["enable_video_playback"] = ENABLE_VIDEO_PLAYBACK
+        with open("config/config.json", "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=4, ensure_ascii=False)
+        return "启用视频播放" if enable else "禁用视频播放"
+
+    @staticmethod
+    def _get_service_status(enable_video_playback, enable_fallback_playlist):
+        """获取当前启用的服务状态"""
+        services = ["NeteaseMusic"]  # 网易云音乐服务始终可用
+        if enable_video_playback:
+            services.append("BilibiliVideo")  # 如果视频播放启用，则添加视频服务
+        if enable_fallback_playlist:
+            services.append("FallbackPlaylist")  # 如果随机播放歌单启用，则添加此服务
+        
+        if services:
+            return f"功能服务: \n{', \n'.join(services)}"
+        else:
+            return "功能服务: None"
 
     @staticmethod
     async def _get_queue_status():
@@ -929,9 +1354,14 @@ class CommandHandler:
                 await song_queue.put(item)
             
             # 生成队列详情字符串
-            queue_details = [f"当前队列中有 {len(queue_copy)} 首歌曲:"]
-            for i, (sid, name, artist) in enumerate(queue_copy, 1):
-                queue_details.append(f"{i}. {name} - {artist}")
+            queue_details = [f"当前队列中有 {len(queue_copy)} 首歌曲/视频:"]
+            for i, item in enumerate(queue_copy, 1):
+                if isinstance(item, tuple) and len(item) == 3:
+                    sid, name, artist = item
+                    queue_details.append(f"{i}. {name} - {artist}")
+                else:
+                    # 视频ID
+                    queue_details.append(f"{i}. 视频: {item}")
             
             return "\n".join(queue_details)
 
@@ -939,14 +1369,34 @@ class CommandHandler:
     async def _queue_add(query):
         """队列增加歌曲"""
         print(format_admin_output("ADMIN", f"收到队列添加请求: {query}"))
-        sid, name, artist = music_bot.get_song_info(query)
-        if sid:
+        
+        # 解析视频ID，支持多分p格式
+        parsed_video_id, p_number = parse_bilibili_id(query)
+        
+        # 检查是否是B站视频ID（先检查原始ID格式，再检查解析后的ID格式）
+        if is_valid_bilibili_id(query) or is_valid_bilibili_id(parsed_video_id):
             if song_queue.qsize() >= QUEUE_MAXSIZE:
                 return "点歌队列已满，无法加入"
-            await song_queue.put((sid, name, artist))
-            return f"入队成功: {name} (添加者: ADMIN)"
+            
+            # 如果有分p信息，构建完整的URL
+            if p_number:
+                video_url = f"{parsed_video_id}?p={p_number}"
+                print(format_system_output(f"解析分p视频: {video_url}"))
+            else:
+                video_url = parsed_video_id
+            
+            await song_queue.put(video_url)
+            return f"入队成功: {video_url} (添加者: ADMIN)"
         else:
-            return "未找到歌曲"
+            # 尝试解析为歌曲
+            sid, name, artist = music_bot.get_song_info(query)
+            if sid:
+                if song_queue.qsize() >= QUEUE_MAXSIZE:
+                    return "点歌队列已满，无法加入"
+                await song_queue.put((sid, name, artist))
+                return f"入队成功: {name} (添加者: ADMIN)"
+            else:
+                return "未找到歌曲或无效的视频ID"
 
     @staticmethod
     async def _queue_del(index):
@@ -976,7 +1426,7 @@ class CommandHandler:
             return f"队列中只有 {len(queue_copy)} 首歌曲，无法删除第 {index} 首"
         
         # 删除指定索引的歌曲 (index - 1 是列表中的实际索引)
-        deleted_song = queue_copy.pop(index - 1)
+        deleted_item = queue_copy.pop(index - 1)
         
         # 重建队列，排除被删除的歌曲
         new_items = queue_copy[:]
@@ -987,7 +1437,11 @@ class CommandHandler:
         for item in new_items:
             await song_queue.put(item)
         
-        return f"已删除第 {index} 首歌曲: {deleted_song[1]} - {deleted_song[2]}"
+        if isinstance(deleted_item, tuple) and len(deleted_item) == 3:
+            sid, name, artist = deleted_item
+            return f"已删除第 {index} 首歌曲: {name} - {artist}"
+        else:
+            return f"已删除第 {index} 个视频: {deleted_item}"
 
     @staticmethod
     async def _queue_clr():
@@ -997,22 +1451,39 @@ class CommandHandler:
             await song_queue.get()
             cleared_count += 1
         
-        return f"已清空队列，共删除 {cleared_count} 首歌曲"
+        return f"已清空队列，共删除 {cleared_count} 首歌曲/视频"
 
 # 配置热重载处理器
 class ConfigReloadHandler(FileSystemEventHandler):
+    def __init__(self):
+        super().__init__()
+        self.last_reload_time = 0
+        self.reload_cooldown = 1.0
+    
     def on_modified(self, event):
         if event.src_path.endswith("config/config.json"):
-            global config, gui_log
+            current_time = time.time()
+            # 检查是否在冷却时间内
+            if current_time - self.last_reload_time < self.reload_cooldown:
+                return
+            
+            global config, gui_log, ENABLE_VIDEO_PLAYBACK, VIDEO_TIMEOUT_BUFFER, ROOM_ID, POLL_INTERVAL, FALLBACK_PLAYLIST_ID, QUEUE_MAXSIZE, ADMINS, ENABLE_FALLBACK_PLAYLIST
             config = load_config()
-            print(format_system_output("配置已热重载"))
+            ENABLE_VIDEO_PLAYBACK = config.get("enable_video_playback", True)
+            VIDEO_TIMEOUT_BUFFER = config.get("env_video_timeout_buffer", 3)
+            ROOM_ID = config.get("env_roomid", 1896163590)
+            POLL_INTERVAL = config.get("env_poll_interval", 5)
+            FALLBACK_PLAYLIST_ID = config.get("env_playlist", 9162892605)
+            QUEUE_MAXSIZE = config.get("env_queue_maxsize", 5)
+            ENABLE_FALLBACK_PLAYLIST = config.get("enable_fallback_playlist", True)  # 新增配置项
+            # print(format_system_output("配置已热重载"))
             # 更新GUI透明度
             if hasattr(gui_log, 'root'):
                 alpha = config.get("env_alpha", 1.0)
                 gui_log.root.attributes("-alpha", alpha)
             # 更新管理员列表
-            global ADMINS
-            ADMINS = set(config.get("env_default_admins", ["琴吹炒面"]))
+            ADMINS = set(config.get("env_default_admins", ["磕磕绊绊学语文", "琴吹炒面"]))
+            self.last_reload_time = current_time
 
 # GUI 日志显示窗口
 class LogWindow:
@@ -1091,7 +1562,7 @@ async def handle_message(msg_data):
             print(format_system_output(result))
         return
     
-    # 检查是否是点歌指令
+    # 统一处理点歌请求（包括音乐和视频）
     if content.startswith(("点歌：", "点歌:")):
         query = content.replace("点歌：", "").replace("点歌:", "").strip()
         if not query: 
@@ -1122,25 +1593,49 @@ async def handle_message(msg_data):
         if not has_perm:
             print(format_system_output(f"{user_name} 's request aborted: Permission denied"))
             return
-            
-        sid, name, artist = music_bot.get_song_info(query)
-        if sid:
+        
+        # 检查是否是B站视频ID
+        parsed_video_id, p_number = parse_bilibili_id(query)
+        
+        if is_valid_bilibili_id(parsed_video_id) and ENABLE_VIDEO_PLAYBACK:
+            # 处理视频ID
             if song_queue.qsize() >= 5:
                 print(format_system_output("点歌队列已满，无法加入"))
                 return
-            await song_queue.put((sid, name, artist))
-            print(format_system_output(f"入队成功: {name} (点歌者: {user_name})"))
-            # 记录成功的点歌请求
-            log_successful_request(user_name, name, artist)
+            # 如果有分p信息，构建完整的URL
+            if p_number:
+                video_url = f"{parsed_video_id}?p={p_number}"
+                print(format_system_output(f"解析分p视频: {video_url}"))
+            else:
+                video_url = parsed_video_id
+            await song_queue.put(video_url)
+            print(format_system_output(f"入队成功: {video_url} (点歌者: {user_name})"))
+            # 记录成功的视频请求
+            log_video_request(user_name, video_url)
             # 扣减临时次数（仅对非白名单、非时间许可用户）
             if (not whitelist_manager.has_permission(user_name) and
                 time.time() >= grant_until_time and
                 user_name in temp_grant_counts):
                 temp_grant_counts[user_name] -= 1
-                # 不删除 key，保持"已领取"状态，防止重复领
         else:
-            print(format_system_output("未找到歌曲"))
-            
+            # 处理音乐搜索
+            sid, name, artist = music_bot.get_song_info(query)
+            if sid:
+                if song_queue.qsize() >= 5:
+                    print(format_system_output("点歌队列已满，无法加入"))
+                    return
+                await song_queue.put((sid, name, artist))
+                print(format_system_output(f"入队成功: {name} (点歌者: {user_name})"))
+                # 记录成功的点歌请求
+                log_successful_request(user_name, name, artist)
+                # 扣减临时次数（仅对非白名单、非时间许可用户）
+                if (not whitelist_manager.has_permission(user_name) and
+                    time.time() >= grant_until_time and
+                    user_name in temp_grant_counts):
+                    temp_grant_counts[user_name] -= 1
+            else:
+                print(format_system_output("未找到歌曲或无效的视频ID"))
+
 async def main():
     asyncio.create_task(player_worker())
     monitor = BilibiliHttpMonitor(ROOM_ID, handle_message)
@@ -1156,7 +1651,7 @@ if __name__ == '__main__':
     
     # 启动配置热重载监听
     observer = Observer()
-    observer.schedule(ConfigReloadHandler(), path=".", recursive=False)
+    observer.schedule(ConfigReloadHandler(), path="config", recursive=False)
     # 启动白名单热重载监听
     observer.schedule(WhitelistReloadHandler(), path=".", recursive=False)
     observer.start()

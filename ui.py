@@ -10,7 +10,8 @@ try:
     from PyQt5.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
         QTabWidget, QFrame, QFormLayout, QLabel, QLineEdit, QPushButton, 
-        QListWidget, QGroupBox, QScrollArea, QMessageBox, QInputDialog, QSlider
+        QListWidget, QGroupBox, QScrollArea, QMessageBox, QInputDialog, QSlider,
+        QCheckBox  # 新增复选框
     )
     from PyQt5.QtCore import Qt, QSize
     from PyQt5.QtGui import QPixmap, QPalette, QColor, QFont, QIcon
@@ -23,7 +24,8 @@ except ImportError:
         from PyQt5.QtWidgets import (
             QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
             QTabWidget, QFrame, QFormLayout, QLabel, QLineEdit, QPushButton, 
-            QListWidget, QGroupBox, QScrollArea, QMessageBox, QInputDialog, QSlider
+            QListWidget, QGroupBox, QScrollArea, QMessageBox, QInputDialog, QSlider,
+            QCheckBox  # 新增复选框
         )
         from PyQt5.QtCore import Qt, QSize
         from PyQt5.QtGui import QPixmap, QPalette, QColor, QFont, QIcon
@@ -59,11 +61,13 @@ class ConfigManager:
             "env_session_file": "data/session.ncm",
             "env_whitelist_file": "config/whitelist.json",
             "env_default_allowed_users": ["琴吹炒面"],
-            "env_default_admins": ["琴吹炒面"],
+            "env_default_admins": ["磕磕绊绊学语文", "琴吹炒面"],
             "env_queue_maxsize": 5,
             "env_log_file": "data/requests.log",
             "env_admin_password": "mysecret",
-            "env_alpha": 1.0
+            "env_alpha": 1.0,
+            "enable_video_playback": True,  # 新增视频播放功能开关
+            "env_video_timeout_buffer": 3  # 新增视频播放超时容错时间（秒）
         }
         self.load_config()
     
@@ -315,6 +319,23 @@ class SemiTransparentWidget(QWidget):
         qmax_label = QLabel("队列最大长度:")
         qmax_label.setFont(font)
         layout.addRow(qmax_label, self.queue_maxsize_input)
+        
+        # 视频播放功能开关
+        self.video_playback_checkbox = QCheckBox("启用视频播放功能")
+        self.video_playback_checkbox.setFont(font)
+        self.video_playback_checkbox.setChecked(self.config_manager.config.get("enable_video_playback", True))
+        video_label = QLabel("视频播放:")
+        video_label.setFont(font)
+        layout.addRow(video_label, self.video_playback_checkbox)
+        
+        # 视频超时容错时间
+        self.video_timeout_buffer_input = QLineEdit()
+        self.video_timeout_buffer_input.setFont(font)
+        self.video_timeout_buffer_input.setStyleSheet("padding: 8px; font-size: 14px;")
+        self.video_timeout_buffer_input.setText(str(self.config_manager.config.get("env_video_timeout_buffer", 3)))
+        timeout_label = QLabel("超时参数(s):")
+        timeout_label.setFont(font)
+        layout.addRow(timeout_label, self.video_timeout_buffer_input)
         
         # 透明度
         self.alpha_slider = QSlider(Qt.Horizontal)
@@ -605,6 +626,10 @@ class SemiTransparentWidget(QWidget):
             self.config_manager.update_config("env_alpha", alpha_value)
             # 更新管理员密码
             self.config_manager.update_config("env_admin_password", self.admin_password_input.text())
+            # 更新视频播放功能开关
+            self.config_manager.update_config("enable_video_playback", self.video_playback_checkbox.isChecked())
+            # 更新视频超时容错时间
+            self.config_manager.update_config("env_video_timeout_buffer", int(self.video_timeout_buffer_input.text()))
             
             QMessageBox.information(self, "成功", "配置已保存！")
         except ValueError as e:
@@ -628,6 +653,10 @@ class SemiTransparentWidget(QWidget):
         self.playlist_input.setText(str(self.config_manager.config.get("env_playlist", "")))
         self.mpv_path_input.setText(self.config_manager.config.get("env_mpv_path", ""))
         self.queue_maxsize_input.setText(str(self.config_manager.config.get("env_queue_maxsize", "")))
+        # 刷新视频播放功能开关
+        self.video_playback_checkbox.setChecked(self.config_manager.config.get("enable_video_playback", True))
+        # 刷新视频超时容错时间
+        self.video_timeout_buffer_input.setText(str(self.config_manager.config.get("env_video_timeout_buffer", 3)))
         # 刷新alpha值
         alpha_value = self.config_manager.config.get("env_alpha", 1.0)
         self.alpha_slider.setValue(int(alpha_value * 100))
@@ -702,6 +731,10 @@ class SemiTransparentWidget(QWidget):
             self.config_manager.update_config("env_alpha", alpha_value)
             # 更新管理员密码
             self.config_manager.update_config("env_admin_password", self.admin_password_input.text())
+            # 更新视频播放功能开关
+            self.config_manager.update_config("enable_video_playback", self.video_playback_checkbox.isChecked())
+            # 更新视频超时容错时间
+            self.config_manager.update_config("env_video_timeout_buffer", int(self.video_timeout_buffer_input.text()))
 
             # 启动 main.py 在新的命令提示符窗口中
             subprocess.Popen([sys.executable, "main.py"], cwd=os.path.dirname(os.path.abspath(__file__)))
@@ -840,6 +873,9 @@ def main():
                 font-size: 14px;
             }
             QLabel {
+                font-size: 14px;
+            }
+            QCheckBox {
                 font-size: 14px;
             }
         """)

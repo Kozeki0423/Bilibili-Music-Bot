@@ -7,3 +7,4 @@ watchdog
 PyQt5
 psutil
 pywin32
+yt-dlp
