@@ -161,12 +161,55 @@ class AdminManager:
     def get_admins(self):
         return sorted(list(self.admins))
 
+class DictManager:
+    def __init__(self, dict_file="./config/dict.json"):
+        self.dict_file = dict_file
+        self.load_dict()
+    
+    def load_dict(self):
+        if os.path.exists(self.dict_file):
+            with open(self.dict_file, 'r', encoding='utf-8') as f:
+                self.dict_data = json.load(f)
+        else:
+            # 确保config目录存在
+            os.makedirs(os.path.dirname(self.dict_file), exist_ok=True)
+            self.dict_data = {"lll": "473403182"}  # 默认词典映射
+            self.save_dict()
+    
+    def save_dict(self):
+        # 确保config目录存在
+        os.makedirs(os.path.dirname(self.dict_file), exist_ok=True)
+        with open(self.dict_file, 'w', encoding='utf-8') as f:
+            json.dump(self.dict_data, f, ensure_ascii=False, indent=2)
+    
+    def add_mapping(self, key, value):
+        if key not in self.dict_data:
+            self.dict_data[key] = value
+            self.save_dict()
+            return True
+        return False
+    
+    def remove_mapping(self, key):
+        if key in self.dict_data:
+            del self.dict_data[key]
+            self.save_dict()
+            return True
+        return False
+    
+    def update_mapping(self, key, value):
+        self.dict_data[key] = value
+        self.save_dict()
+    
+    def get_mappings(self):
+        return self.dict_data
+
 class SemiTransparentWidget(QWidget):
-    def __init__(self, parent=None, config_manager=None, whitelist_manager=None, admin_manager=None):
+    def __init__(self, parent=None, config_manager=None, whitelist_manager=None, admin_manager=None, dict_manager=None):
         super().__init__(parent)
         self.config_manager = config_manager
         self.whitelist_manager = whitelist_manager
         self.admin_manager = admin_manager
+        self.dict_manager = dict_manager
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setup_ui()
     
@@ -212,6 +255,11 @@ class SemiTransparentWidget(QWidget):
         self.admin_tab = QWidget()
         self.create_admin_settings()
         self.tab_widget.addTab(self.admin_tab, "管理员管理")
+        
+        # 词典管理选项卡
+        self.dict_tab = QWidget()
+        self.create_dict_settings()
+        self.tab_widget.addTab(self.dict_tab, "映射管理")
         
         layout.addWidget(self.tab_widget)
         
@@ -547,6 +595,105 @@ class SemiTransparentWidget(QWidget):
         
         layout.addWidget(list_group)
     
+    def create_dict_settings(self):
+        layout = QVBoxLayout(self.dict_tab)
+        
+        # 添加映射区域
+        add_group = QGroupBox("添加词典映射")
+        add_group.setStyleSheet("font-size: 16px; font-weight: bold;")
+        add_layout = QHBoxLayout(add_group)
+        
+        font = QFont()
+        font.setPointSize(14)
+        
+        self.add_key_input = QLineEdit()
+        self.add_key_input.setFont(font)
+        self.add_key_input.setStyleSheet("padding: 8px; font-size: 14px;")
+        self.add_value_input = QLineEdit()
+        self.add_value_input.setFont(font)
+        self.add_value_input.setStyleSheet("padding: 8px; font-size: 14px;")
+        self.add_dict_button = QPushButton("添加")
+        self.add_dict_button.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border: none;
+                padding: 8px 15px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+        self.add_dict_button.clicked.connect(self.add_dict_mapping)
+        
+        add_layout.addWidget(QLabel("关键字:"))
+        add_layout.addWidget(self.add_key_input)
+        add_layout.addWidget(QLabel("映射值:"))
+        add_layout.addWidget(self.add_value_input)
+        add_layout.addWidget(self.add_dict_button)
+        
+        layout.addWidget(add_group)
+        
+        # 词典列表区域
+        list_group = QGroupBox("词典映射列表")
+        list_group.setStyleSheet("font-size: 16px; font-weight: bold;")
+        list_layout = QVBoxLayout(list_group)
+        
+        self.dict_list = QListWidget()
+        self.dict_list.setFont(font)
+        self.dict_list.setStyleSheet("""
+            QListWidget {
+                border: 2px solid #C0C0C0;
+                background-color: rgba(255, 255, 255, 200);
+                font-size: 14px;
+                padding: 8px;
+            }
+        """)
+        self.refresh_dict_list()
+        list_layout.addWidget(self.dict_list)
+        
+        # 编辑和删除按钮
+        button_layout = QHBoxLayout()
+        
+        self.edit_dict_button = QPushButton("编辑映射")
+        self.edit_dict_button.setStyleSheet("""
+            QPushButton {
+                background-color: #FF9800;
+                color: white;
+                border: none;
+                padding: 12px 20px;
+                font-size: 14px;
+                min-width: 120px;
+            }
+            QPushButton:hover {
+                background-color: #F57C00;
+            }
+        """)
+        self.edit_dict_button.clicked.connect(self.edit_selected_dict)
+        button_layout.addWidget(self.edit_dict_button)
+        
+        self.remove_dict_button = QPushButton("删除映射")
+        self.remove_dict_button.setStyleSheet("""
+            QPushButton {
+                background-color: #f44336;
+                color: white;
+                border: none;
+                padding: 12px 20px;
+                font-size: 14px;
+                min-width: 120px;
+            }
+            QPushButton:hover {
+                background-color: #d32f2f;
+            }
+        """)
+        self.remove_dict_button.clicked.connect(self.remove_selected_dict)
+        button_layout.addWidget(self.remove_dict_button)
+        
+        list_layout.addLayout(button_layout)
+        
+        layout.addWidget(list_group)
+    
     def add_user(self):
         username = self.add_user_input.text().strip()
         if not username:
@@ -599,6 +746,59 @@ class SemiTransparentWidget(QWidget):
         else:
             QMessageBox.warning(self, "警告", f"删除管理员 '{username}' 失败！")
     
+    def add_dict_mapping(self):
+        key = self.add_key_input.text().strip()
+        value = self.add_value_input.text().strip()
+        if not key or not value:
+            QMessageBox.warning(self, "警告", "请输入关键字和映射值！")
+            return
+        
+        if self.dict_manager.add_mapping(key, value):
+            QMessageBox.information(self, "成功", f"词典映射 '{key} -> {value}' 已添加！")
+            self.add_key_input.clear()
+            self.add_value_input.clear()
+            self.refresh_dict_list()
+        else:
+            QMessageBox.warning(self, "警告", f"关键字 '{key}' 已存在于词典中！")
+    
+    def remove_selected_dict(self):
+        selected_items = self.dict_list.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "警告", "请先选中一个映射！")
+            return
+        
+        item_text = selected_items[0].text()
+        # 从列表项文本中提取关键字 (格式为 "key -> value")
+        key = item_text.split(" -> ")[0]
+        if self.dict_manager.remove_mapping(key):
+            QMessageBox.information(self, "成功", f"词典映射 '{key}' 已删除！")
+            self.refresh_dict_list()
+        else:
+            QMessageBox.warning(self, "警告", f"删除词典映射 '{key}' 失败！")
+    
+    def edit_selected_dict(self):
+        selected_items = self.dict_list.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "警告", "请先选中一个映射！")
+            return
+        
+        item_text = selected_items[0].text()
+        # 从列表项文本中提取关键字和值 (格式为 "key -> value")
+        parts = item_text.split(" -> ")
+        if len(parts) < 2:
+            QMessageBox.warning(self, "警告", "无法解析映射项！")
+            return
+        
+        old_key = parts[0]
+        old_value = parts[1]
+        
+        # 弹出对话框让用户编辑值
+        new_value, ok = QInputDialog.getText(self, "编辑映射", f"编辑映射值 '{old_key}':", QLineEdit.Normal, old_value)
+        if ok and new_value:
+            self.dict_manager.update_mapping(old_key, new_value)
+            QMessageBox.information(self, "成功", f"词典映射 '{old_key} -> {new_value}' 已更新！")
+            self.refresh_dict_list()
+    
     def refresh_whitelist(self):
         self.whitelist_list.clear()
         users = self.whitelist_manager.get_users()
@@ -610,6 +810,12 @@ class SemiTransparentWidget(QWidget):
         admins = self.admin_manager.get_admins()
         for admin in admins:
             self.admin_list.addItem(admin)
+    
+    def refresh_dict_list(self):
+        self.dict_list.clear()
+        mappings = self.dict_manager.get_mappings()
+        for key, value in mappings.items():
+            self.dict_list.addItem(f"{key} -> {value}")
     
     def save_config(self):
         try:
@@ -672,6 +878,9 @@ class SemiTransparentWidget(QWidget):
         
         # 刷新管理员列表
         self.refresh_admins()
+        
+        # 刷新词典列表
+        self.refresh_dict_list()
     
     def is_main_running(self):
         """精确检查 main.py 是否作为 Python 脚本正在运行"""
@@ -753,6 +962,7 @@ class MainWindow(QMainWindow):
         self.config_manager = ConfigManager()
         self.whitelist_manager = WhitelistManager(self.config_manager.config.get("env_whitelist_file", "config/whitelist.json"))
         self.admin_manager = AdminManager(self.config_manager)
+        self.dict_manager = DictManager()
         
         self.setWindowTitle("Kozeki_UserInterface")
         self.setFixedSize(700, 1000)  # 放大窗口
@@ -809,12 +1019,13 @@ class MainWindow(QMainWindow):
             # 如果图片加载失败，使用纯色半透明背景
             pass
         
-        # 创建内容部件，传入配置管理器、白名单管理器和管理员管理器
+        # 创建内容部件，传入配置管理器、白名单管理器、管理员管理器和词典管理器
         self.content_widget = SemiTransparentWidget(
             parent=self, 
             config_manager=self.config_manager, 
             whitelist_manager=self.whitelist_manager,
-            admin_manager=self.admin_manager
+            admin_manager=self.admin_manager,
+            dict_manager=self.dict_manager
         )
         main_layout.addWidget(self.content_widget)
 
@@ -893,3 +1104,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+

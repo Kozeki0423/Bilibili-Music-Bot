@@ -325,6 +325,49 @@ class WhitelistReloadHandler(FileSystemEventHandler):
             print(f"[SYS] 白名单用户数: {len(whitelist_manager.allowed_users)}")
             self.last_reload_time = current_time
 
+# 词典热重载处理器
+class DictReloadHandler(FileSystemEventHandler):
+    def __init__(self):
+        super().__init__()
+        self.last_reload_time = 0
+        self.reload_cooldown = 1.0
+
+    def on_modified(self, event):
+        if event.src_path.endswith("./config/dict.json"):
+            current_time = time.time()
+            # 检查是否在冷却时间内
+            if current_time - self.last_reload_time < self.reload_cooldown:
+                return
+            
+            print("[SYS] Reloaded")
+            global dict_map
+            dict_map = load_dict_map()
+            print(f"[SYS] 映射量: {len(dict_map)}")
+            self.last_reload_time = current_time
+
+# 词典映射
+def load_dict_map():
+    """加载词典映射文件"""
+    dict_path = "./config/dict.json"
+    default_dict = {
+        "lll": "473403182"
+    }
+    
+    if not os.path.exists(dict_path):
+        # 创建config目录
+        os.makedirs(os.path.dirname(dict_path), exist_ok=True)
+        with open(dict_path, 'w', encoding='utf-8') as f:
+            json.dump(default_dict, f, indent=4, ensure_ascii=False)
+        print(f"[SYS] 词典映射文件已创建: {dict_path}")
+        print("[SYS] 请修改词典映射文件后重新启动程序")
+        return default_dict
+    
+    with open(dict_path, 'r', encoding='utf-8') as f:
+        print(f"[SYS] {dict_path} 已加载")
+        return json.load(f)
+
+dict_map = load_dict_map()
+
 # 全局变量用于控制播放
 current_mpv_process = None
 mpv_ipc_path = None
@@ -999,6 +1042,13 @@ class CommandHandler:
 │ !service video stop  - 禁用视频播放功能
 
 ┌──────────────────────
+│ [词典管理]
+├──────────────────────
+│ !dict            - 查看词典映射
+│ !dict add key value - 添加词典映射
+│ !dict rm key     - 删除词典映射
+
+┌──────────────────────
 │ [其他]
 ├──────────────────────
 │ !service           - 检查功能服务
@@ -1301,6 +1351,32 @@ class CommandHandler:
                 # 处理 !service 命令，检查当前启用的功能服务
                 # 传递全局变量ENABLE_VIDEO_PLAYBACK作为参数
                 return CommandHandler._get_service_status(ENABLE_VIDEO_PLAYBACK, ENABLE_FALLBACK_PLAYLIST)
+            elif cmd == '!dict' and len(parts) == 1:
+                # !dict - 查看词典映射
+                if dict_map:
+                    dict_items = list(dict_map.items())[:10]  # 显示前10个
+                    dict_list = [f"{key} -> {value}" for key, value in dict_items]
+                    if len(dict_map) > 10:
+                        dict_list.append(f"... 等{len(dict_map)}个映射")
+                    return f"词典映射 ({len(dict_map)}个): " + ", ".join(dict_list)
+                else:
+                    return "词典映射为空"
+            elif cmd == '!dict' and len(parts) >= 3 and parts[1].lower() == 'add':
+                # !dict add key value - 添加词典映射
+                key = parts[2]
+                value = ' '.join(parts[3:])
+                dict_map[key] = value
+                save_dict_map()
+                return f"已添加词典映射: {key} -> {value}"
+            elif cmd == '!dict' and len(parts) == 3 and parts[1].lower() == 'rm':
+                # !dict rm key - 删除词典映射
+                key = parts[2]
+                if key in dict_map:
+                    del dict_map[key]
+                    save_dict_map()
+                    return f"已删除词典映射: {key}"
+                else:
+                    return f"词典中不存在关键字: {key}"
             else:
                 return f"unknown command: {cmd}，使用 !help 查看帮助"
         except Exception as e:
@@ -1453,6 +1529,16 @@ class CommandHandler:
         
         return f"已清空队列，共删除 {cleared_count} 首歌曲/视频"
 
+# 保存词典映射到文件
+def save_dict_map():
+    """保存词典映射到文件"""
+    dict_path = "./config/dict.json"
+    # 确保config目录存在
+    os.makedirs(os.path.dirname(dict_path), exist_ok=True)
+    with open(dict_path, 'w', encoding='utf-8') as f:
+        json.dump(dict_map, f, ensure_ascii=False, indent=2)
+    print(f"词典映射已保存到 {dict_path}")
+
 # 配置热重载处理器
 class ConfigReloadHandler(FileSystemEventHandler):
     def __init__(self):
@@ -1489,7 +1575,7 @@ class ConfigReloadHandler(FileSystemEventHandler):
 class LogWindow:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Kozeki_GUI")
+        self.root.title("CLI")  # 修改窗口标题
         self.root.geometry("400x200")
         self.root.attributes("-topmost", True)  # 窗口置顶
         self.alpha = config.get("env_alpha", 1.0)  # 从配置读取透明度
@@ -1562,12 +1648,82 @@ async def handle_message(msg_data):
             print(format_system_output(result))
         return
     
+    # 检查是否包含"撤销"关键词
+    if "撤销" in content:
+        # 检查该用户在队列中的点歌
+        user_songs = []
+        queue_copy = []
+        temp_queue = asyncio.Queue()
+        
+        # 复制队列内容
+        while not song_queue.empty():
+            item = await song_queue.get()
+            queue_copy.append(item)
+            await temp_queue.put(item)
+        
+        # 恢复原始队列
+        while not temp_queue.empty():
+            item = await temp_queue.get()
+            await song_queue.put(item)
+        
+        # 找到该用户点的歌
+        for i, item in enumerate(queue_copy):
+            if isinstance(item, tuple) and len(item) == 3:
+                # 这是一个音乐项
+                sid, name, artist = item
+                # 通过日志判断这首歌是否是该用户点的
+                try:
+                    with open(LOG_FILE, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            if f"[{user_name}]：" in line and name in line:
+                                user_songs.append(i)
+                                break
+                except:
+                    pass
+            else:
+                # 这是一个视频项
+                video_id = item
+                try:
+                    with open(LOG_FILE, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            if f"[{user_name}]：" in line and video_id in line:
+                                user_songs.append(i)
+                                break
+                except:
+                    pass
+        
+        if user_songs:
+            # 从队列中删除该用户的所有歌曲
+            new_queue_items = []
+            for i, item in enumerate(queue_copy):
+                if i not in user_songs:
+                    new_queue_items.append(item)
+            
+            # 清空原队列
+            while not song_queue.empty():
+                await song_queue.get()
+            
+            # 重新放入非该用户的歌曲
+            for item in new_queue_items:
+                await song_queue.put(item)
+            
+            print(format_system_output(f"{user_name} 撤销了 {len(user_songs)} 首歌曲"))
+        else:
+            # 没有找到该用户的歌曲，返回空消息
+            pass
+        return
+    
     # 统一处理点歌请求（包括音乐和视频）
     if content.startswith(("点歌：", "点歌:")):
         query = content.replace("点歌：", "").replace("点歌:", "").strip()
         if not query: 
             return
         print(format_system_output(f"收到点歌请求: {query} (来自: {user_name})"))
+        
+        # 检查词典映射
+        if query in dict_map:
+            print(format_system_output(f"完成映射: {query} -> {dict_map[query]}"))
+            query = dict_map[query]
         
         # 检查用户权限
         has_perm = (
@@ -1654,6 +1810,8 @@ if __name__ == '__main__':
     observer.schedule(ConfigReloadHandler(), path="config", recursive=False)
     # 启动白名单热重载监听
     observer.schedule(WhitelistReloadHandler(), path=".", recursive=False)
+    # 启动词典热重载监听
+    observer.schedule(DictReloadHandler(), path="./config", recursive=False)
     observer.start()
     
     gui_log = LogWindow()
@@ -1667,3 +1825,6 @@ if __name__ == '__main__':
     gui_log.run()
     observer.stop()
     observer.join()
+
+
+
