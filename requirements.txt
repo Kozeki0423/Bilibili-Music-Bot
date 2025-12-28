@@ -8,3 +8,6 @@ PyQt5
 psutil
 pywin32
 yt-dlp
+playwright
+keyboard
+pynput

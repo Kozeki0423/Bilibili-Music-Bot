@@ -4,6 +4,7 @@ import subprocess
 import os
 from datetime import datetime
 import psutil
+import tempfile
 
 # 检查环境
 try:
@@ -24,8 +25,6 @@ except ImportError:
         from PyQt5.QtWidgets import (
             QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
             QTabWidget, QFrame, QFormLayout, QLabel, QLineEdit, QPushButton, 
-            QListWidget, QGroupBox, QScrollArea, QMessageBox, QInputDialog, QSlider,
-            QCheckBox  # 新增复选框
         )
         from PyQt5.QtCore import Qt, QSize
         from PyQt5.QtGui import QPixmap, QPalette, QColor, QFont, QIcon
@@ -67,7 +66,8 @@ class ConfigManager:
             "env_admin_password": "mysecret",
             "env_alpha": 1.0,
             "enable_video_playback": True,  # 新增视频播放功能开关
-            "env_video_timeout_buffer": 3  # 新增视频播放超时容错时间（秒）
+            "env_video_timeout_buffer": 3,  # 新增视频播放超时容错时间（秒）
+            "env_unorthodox": False  # 新增非正统音乐源功能开关
         }
         self.load_config()
     
@@ -90,6 +90,32 @@ class ConfigManager:
     def update_config(self, key, value):
         self.config[key] = value
         self.save_config()
+
+class HotkeyManager:
+    def __init__(self, hotkeys_file="config/hotkeys.json"):
+        self.hotkeys_file = hotkeys_file
+        self.load_hotkeys()
+    
+    def load_hotkeys(self):
+        if os.path.exists(self.hotkeys_file):
+            with open(self.hotkeys_file, 'r', encoding='utf-8') as f:
+                self.hotkeys = json.load(f)
+        else:
+            # 确保config目录存在
+            os.makedirs(os.path.dirname(self.hotkeys_file), exist_ok=True)
+            self.hotkeys = {
+                "hotkey_skip": "alt+right",
+                "hotkey_play_pause": "alt+p",
+                "hotkey_volume_up": "alt+up",
+                "hotkey_volume_down": "alt+down"
+            }
+            self.save_hotkeys()
+    
+    def save_hotkeys(self):
+        # 确保config目录存在
+        os.makedirs(os.path.dirname(self.hotkeys_file), exist_ok=True)
+        with open(self.hotkeys_file, 'w', encoding='utf-8') as f:
+            json.dump(self.hotkeys, f, ensure_ascii=False, indent=4)
 
 class WhitelistManager:
     def __init__(self, whitelist_file="config/whitelist.json"):
@@ -204,12 +230,13 @@ class DictManager:
         return self.dict_data
 
 class SemiTransparentWidget(QWidget):
-    def __init__(self, parent=None, config_manager=None, whitelist_manager=None, admin_manager=None, dict_manager=None):
+    def __init__(self, parent=None, config_manager=None, whitelist_manager=None, admin_manager=None, dict_manager=None, hotkey_manager=None):
         super().__init__(parent)
         self.config_manager = config_manager
         self.whitelist_manager = whitelist_manager
         self.admin_manager = admin_manager
         self.dict_manager = dict_manager
+        self.hotkey_manager = hotkey_manager
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setup_ui()
     
@@ -260,6 +287,11 @@ class SemiTransparentWidget(QWidget):
         self.dict_tab = QWidget()
         self.create_dict_settings()
         self.tab_widget.addTab(self.dict_tab, "映射管理")
+        
+        # 快捷键设置选项卡
+        self.hotkey_tab = QWidget()
+        self.create_hotkey_settings()
+        self.tab_widget.addTab(self.hotkey_tab, "快捷键设置")
         
         layout.addWidget(self.tab_widget)
         
@@ -375,6 +407,14 @@ class SemiTransparentWidget(QWidget):
         video_label = QLabel("视频播放:")
         video_label.setFont(font)
         layout.addRow(video_label, self.video_playback_checkbox)
+        
+        # 非正统音乐源功能开关
+        self.unorthodox_checkbox = QCheckBox("启用备用音乐源")
+        self.unorthodox_checkbox.setFont(font)
+        self.unorthodox_checkbox.setChecked(self.config_manager.config.get("env_unorthodox", False))
+        unorthodox_label = QLabel("备线:")
+        unorthodox_label.setFont(font)
+        layout.addRow(unorthodox_label, self.unorthodox_checkbox)
         
         # 透明度
         self.alpha_slider = QSlider(Qt.Horizontal)
@@ -694,6 +734,50 @@ class SemiTransparentWidget(QWidget):
         
         layout.addWidget(list_group)
     
+    def create_hotkey_settings(self):
+        layout = QFormLayout(self.hotkey_tab)
+        # 修复：使用正确的枚举值
+        layout.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
+        
+        font = QFont()
+        font.setPointSize(14)
+        
+        # 快捷键跳过
+        self.hotkey_skip_input = QLineEdit()
+        self.hotkey_skip_input.setFont(font)
+        self.hotkey_skip_input.setStyleSheet("padding: 8px; font-size: 14px;")
+        self.hotkey_skip_input.setText(self.hotkey_manager.hotkeys.get("hotkey_skip", ""))
+        skip_label = QLabel("跳过快捷键:")
+        skip_label.setFont(font)
+        layout.addRow(skip_label, self.hotkey_skip_input)
+        
+        # 快捷键播放/暂停
+        self.hotkey_play_pause_input = QLineEdit()
+        self.hotkey_play_pause_input.setFont(font)
+        self.hotkey_play_pause_input.setStyleSheet("padding: 8px; font-size: 14px;")
+        self.hotkey_play_pause_input.setText(self.hotkey_manager.hotkeys.get("hotkey_play_pause", ""))
+        play_pause_label = QLabel("播放/暂停快捷键:")
+        play_pause_label.setFont(font)
+        layout.addRow(play_pause_label, self.hotkey_play_pause_input)
+        
+        # 快捷键音量增加
+        self.hotkey_volume_up_input = QLineEdit()
+        self.hotkey_volume_up_input.setFont(font)
+        self.hotkey_volume_up_input.setStyleSheet("padding: 8px; font-size: 14px;")
+        self.hotkey_volume_up_input.setText(self.hotkey_manager.hotkeys.get("hotkey_volume_up", ""))
+        volume_up_label = QLabel("音量增加快捷键:")
+        volume_up_label.setFont(font)
+        layout.addRow(volume_up_label, self.hotkey_volume_up_input)
+        
+        # 快捷键音量减少
+        self.hotkey_volume_down_input = QLineEdit()
+        self.hotkey_volume_down_input.setFont(font)
+        self.hotkey_volume_down_input.setStyleSheet("padding: 8px; font-size: 14px;")
+        self.hotkey_volume_down_input.setText(self.hotkey_manager.hotkeys.get("hotkey_volume_down", ""))
+        volume_down_label = QLabel("音量减少快捷键:")
+        volume_down_label.setFont(font)
+        layout.addRow(volume_down_label, self.hotkey_volume_down_input)
+    
     def add_user(self):
         username = self.add_user_input.text().strip()
         if not username:
@@ -834,8 +918,17 @@ class SemiTransparentWidget(QWidget):
             self.config_manager.update_config("env_admin_password", self.admin_password_input.text())
             # 更新视频播放功能开关
             self.config_manager.update_config("enable_video_playback", self.video_playback_checkbox.isChecked())
+            # 更新非正统音乐源功能开关
+            self.config_manager.update_config("env_unorthodox", self.unorthodox_checkbox.isChecked())
             # 更新视频超时容错时间
             self.config_manager.update_config("env_video_timeout_buffer", int(self.video_timeout_buffer_input.text()))
+            
+            # 更新快捷键配置
+            self.hotkey_manager.hotkeys["hotkey_skip"] = self.hotkey_skip_input.text()
+            self.hotkey_manager.hotkeys["hotkey_play_pause"] = self.hotkey_play_pause_input.text()
+            self.hotkey_manager.hotkeys["hotkey_volume_up"] = self.hotkey_volume_up_input.text()
+            self.hotkey_manager.hotkeys["hotkey_volume_down"] = self.hotkey_volume_down_input.text()
+            self.hotkey_manager.save_hotkeys()
             
             QMessageBox.information(self, "成功", "配置已保存！")
         except ValueError as e:
@@ -849,6 +942,14 @@ class SemiTransparentWidget(QWidget):
         if reply == QMessageBox.Yes:
             self.config_manager.config = self.config_manager.default_config.copy()
             self.config_manager.save_config()
+            # 重置快捷键为默认值
+            self.hotkey_manager.hotkeys = {
+                "hotkey_skip": "alt+right",
+                "hotkey_play_pause": "alt+p",
+                "hotkey_volume_up": "alt+up",
+                "hotkey_volume_down": "alt+down"
+            }
+            self.hotkey_manager.save_hotkeys()
             self.refresh_ui()
             QMessageBox.information(self, "成功", "已重置为默认配置！")
     
@@ -861,6 +962,8 @@ class SemiTransparentWidget(QWidget):
         self.queue_maxsize_input.setText(str(self.config_manager.config.get("env_queue_maxsize", "")))
         # 刷新视频播放功能开关
         self.video_playback_checkbox.setChecked(self.config_manager.config.get("enable_video_playback", True))
+        # 刷新非正统音乐源功能开关
+        self.unorthodox_checkbox.setChecked(self.config_manager.config.get("env_unorthodox", False))
         # 刷新alpha值
         alpha_value = self.config_manager.config.get("env_alpha", 1.0)
         self.alpha_slider.setValue(int(alpha_value * 100))
@@ -872,6 +975,12 @@ class SemiTransparentWidget(QWidget):
         self.admin_password_input.setText(self.config_manager.config.get("env_admin_password", ""))
         # 刷新视频超时容错时间
         self.video_timeout_buffer_input.setText(str(self.config_manager.config.get("env_video_timeout_buffer", 3)))
+        
+        # 刷新快捷键设置界面
+        self.hotkey_skip_input.setText(self.hotkey_manager.hotkeys.get("hotkey_skip", ""))
+        self.hotkey_play_pause_input.setText(self.hotkey_manager.hotkeys.get("hotkey_play_pause", ""))
+        self.hotkey_volume_up_input.setText(self.hotkey_manager.hotkeys.get("hotkey_volume_up", ""))
+        self.hotkey_volume_down_input.setText(self.hotkey_manager.hotkeys.get("hotkey_volume_down", ""))
         
         # 刷新白名单
         self.refresh_whitelist()
@@ -942,8 +1051,17 @@ class SemiTransparentWidget(QWidget):
             self.config_manager.update_config("env_admin_password", self.admin_password_input.text())
             # 更新视频播放功能开关
             self.config_manager.update_config("enable_video_playback", self.video_playback_checkbox.isChecked())
+            # 更新非正统音乐源功能开关
+            self.config_manager.update_config("env_unorthodox", self.unorthodox_checkbox.isChecked())
             # 更新视频超时容错时间
             self.config_manager.update_config("env_video_timeout_buffer", int(self.video_timeout_buffer_input.text()))
+            
+            # 更新快捷键配置
+            self.hotkey_manager.hotkeys["hotkey_skip"] = self.hotkey_skip_input.text()
+            self.hotkey_manager.hotkeys["hotkey_play_pause"] = self.hotkey_play_pause_input.text()
+            self.hotkey_manager.hotkeys["hotkey_volume_up"] = self.hotkey_volume_up_input.text()
+            self.hotkey_manager.hotkeys["hotkey_volume_down"] = self.hotkey_volume_down_input.text()
+            self.hotkey_manager.save_hotkeys()
 
             # 启动 main.py 在新的命令提示符窗口中
             subprocess.Popen([sys.executable, "main.py"], cwd=os.path.dirname(os.path.abspath(__file__)))
@@ -963,6 +1081,7 @@ class MainWindow(QMainWindow):
         self.whitelist_manager = WhitelistManager(self.config_manager.config.get("env_whitelist_file", "config/whitelist.json"))
         self.admin_manager = AdminManager(self.config_manager)
         self.dict_manager = DictManager()
+        self.hotkey_manager = HotkeyManager()
         
         self.setWindowTitle("Kozeki_UserInterface")
         self.setFixedSize(700, 1000)  # 放大窗口
@@ -1025,7 +1144,8 @@ class MainWindow(QMainWindow):
             config_manager=self.config_manager, 
             whitelist_manager=self.whitelist_manager,
             admin_manager=self.admin_manager,
-            dict_manager=self.dict_manager
+            dict_manager=self.dict_manager,
+            hotkey_manager=self.hotkey_manager
         )
         main_layout.addWidget(self.content_widget)
 
@@ -1104,6 +1224,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
